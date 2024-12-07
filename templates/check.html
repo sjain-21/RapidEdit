@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Check and Update</h2>
+<p>Review the image, mask, and prompt below:</p>
+<div>
+    <h3>Input Image:</h3>
+    <img src="{{ image_path }}" alt="Input Image" style="max-width: 100%; height: auto;">
+</div>
+<div>
+    <h3>Stitched Mask:</h3>
+    <img src="{{ mask_path }}" alt="Stitched Mask" style="max-width: 100%; height: auto;">
+</div>
+<form method="POST">
+    <label for="prompt">Update Prompt:</label>
+    <input type="text" name="prompt" value="{{ prompt }}" required>
+    <button type="submit">Update and Proceed</button>
+</form>
+{% endblock %}

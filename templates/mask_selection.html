@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Select Masks</h2>
+<img src="{{ mask_overlay }}" alt="Mask Overlay" style="max-width: 100%; height: auto;">
+<form method="POST">
+    <label for="selected_masks">Select the masks you want to use:</label>
+    <select name="selected_masks" id="selected_masks" multiple size="10">
+        {% for mask in masks %}
+            <option value="{{ loop.index }}">Mask {{ loop.index }}</option>
+        {% endfor %}
+    </select>
+    <br>
+    <button type="submit">Proceed</button>
+</form>
+{% endblock %}
