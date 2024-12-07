@@ -6,4 +6,5 @@ Pillow
 numpy
 opencv-python
 transformers
+peft
 git+https://github.com/facebookresearch/segment-anything.git
