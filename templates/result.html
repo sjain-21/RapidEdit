@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Result</h2>
+<p><strong>Prompt:</strong> {{ prompt }}</p> <!-- Display the prompt at the top -->
+<p>Here are the results based on your input:</p>
+<div>
+    <h3>Input Image:</h3>
+    <img src="{{ input_image }}" alt="Input Image" style="max-width: 100%; height: auto;">
+</div>
+<div>
+    <h3>Output Image:</h3>
+    <img src="{{ output_image }}" alt="Output Image" style="max-width: 100%; height: auto;">
+</div>
+<form method="POST">
+    <button type="submit" name="reuse">Reuse Output Image</button>
+    <button type="submit" name="restart">Restart Process</button>
+</form>
+{% endblock %}

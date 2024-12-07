@@ -1,7 +1,9 @@
 flask
 torch
+torchvision
 diffusers
 Pillow
 numpy
 opencv-python
+transformers
 git+https://github.com/facebookresearch/segment-anything.git
