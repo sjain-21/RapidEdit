@@ -77,23 +77,25 @@ def main():
         # Display mask overlay
         st.image(st.session_state.mask_overlay_path, caption="Mask Overlay")
         
+        
         # Mask selection
-        selected_masks = st.multiselect(
+        selected_masks_indices = st.multiselect(
             "Select the masks you want to use:", 
-            [f"Mask {mask['id']}" for mask in st.session_state.masks]
+            [f"Mask {idx}" for idx,_ in enumerate(st.session_state.masks)]
         )
         
         if st.button("Proceed"):
             # Convert selected masks to indices
-            selected_mask_indices = [int(mask.split()[-1]) for mask in selected_masks]
-            
+            # import ipdb ; ipdb.set_trace()
+            #selected_mask_indices = [int(mask.split()[-1]) for mask in selected_masks]
             # Stitch masks
+            selected_mask_indices = [int(i.split(' ')[-1]) for i in selected_masks_indices]
             stitched_mask_path = os.path.join(UPLOAD_FOLDER, "stitched_mask.png")
             stitch_selected_masks(st.session_state.image_path, selected_mask_indices, stitched_mask_path)
             
             # Update session state
             st.session_state.stitched_mask_path = stitched_mask_path
-            st.session_state.selected_masks = selected_masks
+            st.session_state.selected_masks = selected_masks_indices
             
             # Update URL to check stage
             update_query_params("check", image=os.path.basename(st.session_state.image_path))
