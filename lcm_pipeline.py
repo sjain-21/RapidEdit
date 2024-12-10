@@ -4,22 +4,22 @@ from diffusers import DiffusionPipeline
 from PIL import Image
 from diffusers import StableDiffusionInstructPix2PixPipeline
 
-pipe = DiffusionPipeline.from_pretrained(
-    "timbrooks/instruct-pix2pix",
-    torch_dtype=torch.float16,
-).to("cuda")
-
-# pipe = AutoPipelineForInpainting.from_pretrained(
-#     "runwayml/stable-diffusion-inpainting",
+# pipe = DiffusionPipeline.from_pretrained(
+#     "timbrooks/instruct-pix2pix",
 #     torch_dtype=torch.float16,
-#     variant="fp16",
 # ).to("cuda")
+
+pipe = AutoPipelineForInpainting.from_pretrained(
+    "runwayml/stable-diffusion-inpainting",
+    torch_dtype=torch.float16,
+    variant="fp16",
+).to("cuda")
 
 
 
 #pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained("your_cool_model", torch_dtype=torch.float16).to("cuda")
-# pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-# pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
+pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
 # pipe.safety_checker = lambda images, clip_input: (images, False)
 
 def run_inpainting(image_path, mask_path, prompt, output_path, seed = None):
