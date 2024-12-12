@@ -1,170 +1,253 @@
-import streamlit as st
 import os
-from sam_utils import generate_sam_masks, stitch_selected_masks
-from lcm_pipeline import run_inpainting
+import random
+import numpy as np
+import torch
+from PIL import Image
+import cv2
+import streamlit as st
+from diffusers import AutoPipelineForInpainting, LCMScheduler
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 
-# Uploads folder configuration
-UPLOAD_FOLDER = os.path.join("static", "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Constants
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MODEL_CHECKPOINT_PATH = "sam_vit_h_4b8939.pth"
+OUTPUT_DIR = "output"
 
-def get_current_stage():
-    """
-    Retrieve the current stage from URL query parameters
-    """
-    return st.query_params.get("stage", "upload")
+# Ensure output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def update_query_params(stage, **kwargs):
-    """
-    Update URL query parameters for the current stage
-    """
-    # Clear existing query parameters
-    st.query_params.clear()
+def load_sam_model(checkpoint_path):
+    """Load Segment Anything Model (SAM)."""
+    sam = sam_model_registry["vit_h"](checkpoint=checkpoint_path).to(DEVICE)
+    mask_generator = SamAutomaticMaskGenerator(
+        sam,
+        points_per_side=32,
+        pred_iou_thresh=0.9,
+        stability_score_thresh=0.9,
+        crop_n_layers=1,
+        crop_n_points_downscale_factor=2,
+        min_mask_region_area=500,
+    )
+    return mask_generator
+
+def generate_masks(image_np, mask_generator):
+    """Generate and process segmentation masks."""
+    # Set the image for the predictor
+    mask_generator.predictor.set_image(image_np)
     
-    # Set new parameters
-    st.query_params["stage"] = stage
-    for key, value in kwargs.items():
-        st.query_params[key] = value
-
-def main():
-    st.set_page_config(page_title="RAPIDEdit")
-    st.title("RAPIDEdit")
-
-    # Determine current stage from URL
-    current_stage = get_current_stage()
-
-    # Initialize session state if not already set
-    if 'image_path' not in st.session_state:
-        st.session_state.image_path = None
-        st.session_state.prompt = None
-        st.session_state.mask_overlay_path = None
-        st.session_state.masks = None
-        st.session_state.stitched_mask_path = None
-        st.session_state.selected_masks = []
-        st.session_state.output_image_path = None
-
-    # Upload Page
-    if current_stage == 'upload':
-        st.header("Upload Image")
-        uploaded_file = st.file_uploader("Choose an image", type=['png', 'jpg', 'jpeg'])
-        prompt = st.text_input("Enter Prompt:")
+    # Generate masks
+    masks = mask_generator.generate(image_np)
+    filtered_masks = [m for m in masks if m["area"] > 500]
+    
+    # Create mask overlay with labels
+    mask_overlay = image_np.copy()
+    mask_labels = []
+    
+    for idx, mask in enumerate(filtered_masks):
+        segmentation = mask["segmentation"]
+        color = [random.randint(0, 255) for _ in range(3)]
         
-        if uploaded_file is not None:
-            # Save uploaded image
-            image_path = os.path.join(UPLOAD_FOLDER, uploaded_file.name)
-            with open(image_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            st.image(image_path)
+        # Color the mask
+        for c in range(3):
+            mask_overlay[..., c] = np.where(segmentation, color[c], mask_overlay[..., c])
+        
+        # Add mask number
+        ys, xs = np.where(segmentation)
+        center_x, center_y = xs.mean().astype(int), ys.mean().astype(int)
+        font = cv2.FONT_HERSHEY_DUPLEX
+        cv2.putText(mask_overlay, str(idx + 1), (center_x, center_y), font, 0.5, (0, 0, 0), 2)
+        cv2.putText(mask_overlay, str(idx + 1), (center_x, center_y), font, 0.5, (255, 255, 255), 1)
+        
+        mask_labels.append((idx + 1, segmentation))
+    
+    # Reset the image
+    mask_generator.predictor.reset_image()
+    
+    return filtered_masks, mask_overlay, mask_labels
 
-            if st.button("Create Mask") and prompt:
-                # Generate masks
-                masks, mask_overlay_path = generate_sam_masks(image_path)
-                
-                # Update session state
-                st.session_state.image_path = image_path
-                st.session_state.mask_overlay_path = mask_overlay_path
-                st.session_state.masks = masks
-                st.session_state.prompt = prompt
-                
-                # Update URL to mask selection stage
-                update_query_params("mask_selection", image=os.path.basename(image_path))
-                st.rerun()
+def create_combined_mask(filtered_masks, selected_indices=None):
+    """Create a combined mask from selected or highest confidence mask."""
+    combined_mask = np.zeros_like(filtered_masks[0]["segmentation"], dtype=np.uint8)
+    
+    if selected_indices:
+        for idx in map(int, selected_indices):
+            combined_mask = np.logical_or(combined_mask, filtered_masks[idx - 1]["segmentation"]).astype(np.uint8)
+    else:
+        highest_confidence_mask = max(filtered_masks, key=lambda x: x["predicted_iou"])
+        combined_mask = highest_confidence_mask["segmentation"].astype(np.uint8)
+    
+    return Image.fromarray(combined_mask * 255)
 
-    # Mask Selection Page
-    elif current_stage == 'mask_selection':
-        st.header("Select Masks")
+def load_inpainting_pipeline():
+    """Load and configure the inpainting pipeline."""
+    pipe = AutoPipelineForInpainting.from_pretrained(
+        "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+        torch_dtype=torch.float16,
+        variant="fp16",
+    ).to(DEVICE)
+    pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+    pipe.load_lora_weights("latent-consistency/lcm-lora-sdxl")
+    pipe.fuse_lora()
+    return pipe
+
+def run_inpainting(pipe, input_image, combined_mask_image, prompt, negative_prompt):
+    """Run the inpainting process."""
+    generator = torch.manual_seed(0)
+    result = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        image=input_image,
+        generator=generator,
+        mask_image=combined_mask_image,
+        num_inference_steps=20,
+        guidance_scale=7.5,
+    ).images[0]
+    return result
+
+def save_image(image, filename):
+    """Save an image to the output directory."""
+    output_path = os.path.join(OUTPUT_DIR, filename)
+    image.save(output_path)
+    return output_path
+
+def page_image_upload():
+    """First page for image upload."""
+    st.title("Image Upload")
+    
+    uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
+    
+    if uploaded_file:
+        # Save image to session state
+        st.session_state.input_image = Image.open(uploaded_file).convert("RGB")
+        st.session_state.image_np = np.array(st.session_state.input_image)
         
-        # Display mask overlay
-        st.image(st.session_state.mask_overlay_path, caption="Mask Overlay")
+        # Display uploaded image
+        st.image(st.session_state.input_image, caption="Uploaded Image", use_column_width=True)
         
-        
-        # Mask selection
-        selected_masks_indices = st.multiselect(
-            "Select the masks you want to use:", 
-            [f"Mask {idx}" for idx,_ in enumerate(st.session_state.masks)]
+        # Proceed button
+        if st.button("Generate Masks"):
+            st.session_state.page = 2
+            st.rerun()
+
+def page_mask_generation():
+    """Second page for mask generation and selection."""
+    st.title("Mask Generation")
+    
+    # Generate masks
+    st.write("Generating masks...")
+    mask_generator = load_sam_model(MODEL_CHECKPOINT_PATH)
+    st.session_state.filtered_masks, st.session_state.mask_overlay, st.session_state.mask_labels = generate_masks(
+        st.session_state.image_np, 
+        mask_generator
+    )
+    
+    # Display mask overlay
+    st.image(st.session_state.mask_overlay, caption="Mask Overlay", use_column_width=True)
+    st.write(f"Generated {len(st.session_state.mask_labels)} masks.")
+    
+    # Mask selection
+    selected_indices = st.multiselect(
+        "Select mask indices (e.g., 1, 2, 3):", 
+        [str(idx) for idx, _ in st.session_state.mask_labels]
+    )
+    
+    if st.button("Create Combined Mask"):
+        # Create combined mask
+        st.session_state.combined_mask_image = create_combined_mask(
+            st.session_state.filtered_masks, 
+            selected_indices
         )
+        st.image(st.session_state.combined_mask_image, caption="Combined Mask", use_column_width=True)
         
-        if st.button("Proceed"):
-            # Convert selected masks to indices
-            # import ipdb ; ipdb.set_trace()
-            #selected_mask_indices = [int(mask.split()[-1]) for mask in selected_masks]
-            # Stitch masks
-            selected_mask_indices = [int(i.split(' ')[-1]) for i in selected_masks_indices]
-            stitched_mask_path = os.path.join(UPLOAD_FOLDER, "stitched_mask.png")
-            stitch_selected_masks(st.session_state.image_path, selected_mask_indices, stitched_mask_path)
-            
-            # Update session state
-            st.session_state.stitched_mask_path = stitched_mask_path
-            st.session_state.selected_masks = selected_masks_indices
-            
-            # Update URL to check stage
-            update_query_params("check", image=os.path.basename(st.session_state.image_path))
-            st.rerun()
+        # Proceed button
+        if st.button("Go to Prompts"):
+            st.session_state.page = 3 
+            st.experimental_rerun() 
+    
+    # Back button
+    if st.button("Back to Image Upload"):
+        st.session_state.page = 1
+        st.rerun()
 
-    # Check Page
-    elif current_stage == 'check':
-        st.header("Check and Update")
-        
-        # Display images
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(st.session_state.image_path, caption="Input Image")
-        with col2:
-            st.image(st.session_state.stitched_mask_path, caption="Stitched Mask")
-        
-        # Prompt update
-        updated_prompt = st.text_input("Update Prompt:", value=st.session_state.prompt or "")
-        
-        if st.button("Update and Proceed"):
-            # Update prompt
-            st.session_state.prompt = updated_prompt
-            
-            # Update URL to result stage
-            update_query_params("result", image=os.path.basename(st.session_state.image_path))
-            st.rerun()
-
-    # Result Page
-    elif current_stage == 'result':
-        st.header("Result")
-        
-        # Display prompt
-        st.write(f"**Prompt:** {st.session_state.prompt}")
+def page_prompt_input():
+    """Third page for prompt input."""
+    st.title("Inpainting Prompts")
+    
+    # Prompt inputs
+    prompt = st.text_input("Enter the prompt:", "Add a cat with black color")
+    negative_prompt = st.text_input("Enter negative prompt:", "artifacts, spots, glow, light effects")
+    
+    if st.button("Run Inpainting"):
+        # Load inpainting pipeline
+        pipe = load_inpainting_pipeline()
         
         # Run inpainting
-        output_image_path = os.path.join(UPLOAD_FOLDER, "output.png")
-        run_inpainting(st.session_state.image_path, st.session_state.stitched_mask_path, 
-                       st.session_state.prompt, output_image_path)
+        st.session_state.result = run_inpainting(
+            pipe, 
+            st.session_state.input_image, 
+            st.session_state.combined_mask_image, 
+            prompt, 
+            negative_prompt
+        )
         
-        # Display images
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(st.session_state.image_path, caption="Input Image")
-        with col2:
-            st.image(output_image_path, caption="Output Image")
+        # Save result
+        save_image(st.session_state.result, "final_output_image.png")
         
-        # Action buttons
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Reuse Output Image"):
-                # Update session state
-                st.session_state.image_path = output_image_path
-                
-                # Update URL to mask selection stage
-                update_query_params("mask_selection", image=os.path.basename(output_image_path))
-                st.rerun()
+        # Move to results page
+        st.session_state.page = 4
+        st.rerun()
+    
+    # Back button
+    if st.button("Back to Mask Selection"):
+        st.session_state.page = 2
+        st.rerun()
 
-        with col2:
-            if st.button("Restart Process"):
-                # Reset session state
-                st.session_state.image_path = None
-                st.session_state.prompt = None
-                st.session_state.mask_overlay_path = None
-                st.session_state.masks = None
-                st.session_state.stitched_mask_path = None
-                
-                # Update URL to upload stage
-                update_query_params("upload")
-                st.rerun()
+def page_results():
+    """Fourth page for displaying results."""
+    st.title("Inpainting Results")
+    
+    # Display original image
+    st.subheader("Original Image")
+    st.image(st.session_state.input_image, caption="Input Image", use_column_width=True)
+    
+    # Display combined mask
+    st.subheader("Combined Mask")
+    st.image(st.session_state.combined_mask_image, caption="Combined Mask", use_column_width=True)
+    
+    # Display result
+    st.subheader("Inpainted Image")
+    st.image(st.session_state.result, caption="Inpainted Result", use_column_width=True)
+    
+    # Buttons to restart or go back
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Start Over"):
+            # Reset session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.session_state.page = 1
+            st.rerun()
+    
+    with col2:
+        if st.button("Back to Prompts"):
+            st.session_state.page = 3
+            st.rerun()
+
+def main():
+    # Initialize session state for page navigation
+    if 'page' not in st.session_state:
+        st.session_state.page = 1
+    
+    # Page routing
+    if st.session_state.page == 1:
+        page_image_upload()
+    elif st.session_state.page == 2:
+        page_mask_generation()
+    elif st.session_state.page == 3:
+        page_prompt_input()
+    elif st.session_state.page == 4:
+        page_results()
 
 if __name__ == "__main__":
     main()
