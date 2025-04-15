@@ -14,3 +14,5 @@
 
 <img width="818" alt="Screenshot 2024-12-22 at 3 23 53 PM" src="https://github.com/user-attachments/assets/07c41ac8-d7b4-486a-8320-4a56b9b8c19a" />
 
+## Video 
+[RpidEdit Demo](https://drive.google.com/file/d/15-1PmsUoVQcoQJIc1iOV6HSYY82WdR7r/view?usp=sharing)
